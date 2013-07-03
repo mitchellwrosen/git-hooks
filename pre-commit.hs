@@ -2,7 +2,9 @@
 
 module Main where
 
+import Control.Applicative ((<$>))
 import Control.Monad (unless)
+import Data.String.Utils (rstrip)
 import System.Directory (doesFileExist)
 import System.Exit (ExitCode(..), exitFailure)
 import System.FilePath ((</>))
@@ -39,13 +41,13 @@ system' command = do
             [ printf "'%s' failed with exit code %d" command exit_code ]
          ExitSuccess -> return ()
 
--- readProcessWithExitCode' command args input
+-- readProcess' command args input
 --
 -- Runs |command| with |args| and |input|, returning the standard output, or
 -- exiting on failure.
 --
-readProcessWithExitCode' :: String -> [String] -> String -> IO String
-readProcessWithExitCode' command args input= do
+readProcess' :: String -> [String] -> String -> IO String
+readProcess' command args input= do
     readProcessWithExitCode command args input >>=
         \case
             (ExitFailure exit_code, out, err) -> exitFailure' $
@@ -60,7 +62,7 @@ readProcessWithExitCode' command args input= do
 -- Gets the root directory of the current git repository.
 --
 topLevel :: IO String
-topLevel = return "/home/mitchell/projects/git-hooks/"
+topLevel = rstrip <$> readProcess' "git" ["rev-parse", "--show-toplevel"] []
 
 -- getRunTestsPath
 --
