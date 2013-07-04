@@ -3,7 +3,7 @@
 module Main where
 
 import Control.Applicative ((<$>))
-import Control.Monad (unless)
+import Control.Monad (forM_, unless)
 import Data.String.Utils (rstrip)
 import System.Directory (doesFileExist)
 import System.Exit (ExitCode(..), exitFailure)
@@ -16,18 +16,18 @@ import System.Process
 import Text.Printf (hPrintf, printf)
 
 
--- exitFailure' msgs exit_code
+-- exitFailure' command exit_code
 --
--- Prints a failure message (salted with |msgs|, which represent one message
--- split into lines) to stderr and then exits.
+-- Prints a failure message to stderr and then exits.
 --
-exitFailure' :: [String] -> IO a
-exitFailure' msgs = hPrintf stderr msg' >> exitFailure
+exitFailure' :: String -> Int -> IO a
+exitFailure' command exit_code = hPrintf stderr msg >> exitFailure
   where
-    msg' = unlines $ [ "##########################"
-                     , "# PRE-COMMIT HOOK FAILED #"
-                     , "##########################"
-                     ] ++ msgs
+    msg = unlines [ "######################"
+                  , "PRE-COMMIT HOOK FAILED"
+                  , "#######################"
+                  , printf "'%s' failed with exit code %d" command exit_code
+                  ]
 
 -- system' command
 --
@@ -37,9 +37,20 @@ system' :: String -> IO ()
 system' command = do
    system command >>=
       \case
-         ExitFailure exit_code -> exitFailure' $
-            [ printf "'%s' failed with exit code %d" command exit_code ]
-         ExitSuccess -> return ()
+         ExitFailure exit_code -> exitFailure' command exit_code
+         ExitSuccess           -> return ()
+
+-- check command
+--
+-- Runs "command" as a shell command, applying the saved stash and exiting on
+-- ExitFailure.
+--
+check :: String -> IO ()
+check command = do
+   system command >>=
+      \case
+         ExitFailure exit_code -> stashApply >> exitFailure' command exit_code
+         ExitSuccess           -> return ()
 
 -- readProcess' command args input
 --
@@ -50,12 +61,8 @@ readProcess' :: String -> [String] -> String -> IO String
 readProcess' command args input= do
     readProcessWithExitCode command args input >>=
         \case
-            (ExitFailure exit_code, out, err) -> exitFailure' $
-                [ printf "stdout: %s" out
-                , printf "stderr: %s" err
-                , printf "'%s' failed with exit code %d" command exit_code
-                ]
-            (ExitSuccess, out, _) -> return out
+            (ExitFailure exit_code, out, err) -> exitFailure' command exit_code
+            (ExitSuccess, out, _)             -> return out
 
 -- toplevel
 --
@@ -64,26 +71,29 @@ readProcess' command args input= do
 topLevel :: IO String
 topLevel = rstrip <$> readProcess' "git" ["rev-parse", "--show-toplevel"] []
 
--- getRunTestsPath
---
--- Gets the path to run_tests.sh in the root directory of the current git
--- repository. Exits if run_tests.sh doesn't exist.
---
-getRunTestsPath :: IO String
-getRunTestsPath = do
-   run_tests_path <- fmap (</> "run_tests.sh") topLevel
-   run_tests_exists <- doesFileExist run_tests_path
+stashSave :: IO ()
+stashSave = system' "git stash --keep-index --include-untracked --quiet"
 
-   unless run_tests_exists $
-      exitFailure' $ [ printf "'%s' not found." run_tests_path
-                     , "Please create it and hook your test suite into it."
-                     , "A failing test must cause run_tests.sh to return non-zero exit code."
-                     ]
+stashApply :: IO ()
+stashApply = system' "git reset --hard --quiet" >>
+             system' "git stash pop --index --quiet"
 
-   return run_tests_path
+-- Checker command output
+data Checker = Checker String String
+data PresubmitCheck = Check     Checker
+                    | LangCheck Checker String
+
+checkers :: [Checker]
+checkers = [ Checker "./run_tests.sh" "Running run_tests.sh..." ]
 
 main :: IO ()
-main = getRunTestsPath       >>=
-       return . ("bash " ++) >>=
-       system'               >>
-       return ()
+main =
+    stashSave >>
+
+    forM_ checkers (
+        \(Checker command output) ->
+            putStrLn output >>
+            check command
+    ) >>
+
+    stashApply
