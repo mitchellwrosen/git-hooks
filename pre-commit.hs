@@ -6,7 +6,7 @@ import Control.Applicative ((<$>))
 import Control.Monad (forM_, unless)
 import Data.String.Utils (rstrip)
 import System.Directory (doesFileExist)
-import System.Exit (ExitCode(..), exitFailure)
+import System.Exit (ExitCode(..), exitFailure, exitSuccess)
 import System.FilePath ((</>))
 import System.IO (Handle, stderr)
 import System.Process
@@ -24,7 +24,7 @@ exitFailure' command exit_code = hPrintf stderr msg >> exitFailure
   where
     msg = unlines [ "######################"
                   , "PRE-COMMIT HOOK FAILED"
-                  , "#######################"
+                  , "######################"
                   , printf "'%s' failed with exit code %d" command exit_code
                   ]
 
@@ -48,8 +48,8 @@ check :: String -> IO ()
 check command = do
    system command >>=
       \case
-         ExitFailure exit_code -> stashApply >> exitFailure' command exit_code
          ExitSuccess           -> return ()
+         ExitFailure exit_code -> stashApply >> exitFailure' command exit_code
 
 -- readProcess' command args input
 --
@@ -60,8 +60,43 @@ readProcess' :: String -> [String] -> String -> IO String
 readProcess' command args input= do
     readProcessWithExitCode command args input >>=
         \case
-            (ExitFailure exit_code, out, err) -> exitFailure' command exit_code
             (ExitSuccess, out, _)             -> return out
+            (ExitFailure exit_code, out, err) -> exitFailure' command exit_code
+
+-- checkFirstCommit
+--
+-- Checks to see if this is the first commit to the repository, and fail with a
+-- helpful error message if so.
+checkFirstCommit :: IO ()
+checkFirstCommit =
+    system "git rev-parse --verify HEAD >/dev/null 2>&1" >>=
+        \case
+            ExitSuccess -> return ()
+            ExitFailure _ -> putStrLn $
+                unlines [ "######################"
+                        , "PRE-COMMIT HOOK FAILED"
+                        , "######################"
+                        , "Many pre-commit checks rely on a valid HEAD,"
+                        , "so the Easy Way Out is to disable this hook"
+                        , "for your first commit."
+                        , ""
+                        , "Know that this commit will go unchecked, and"
+                        , "with great power comes great responsibility..."
+                        , ""
+                        , "(use git commit --no-verify)"
+                        ]
+
+-- checkEmptyCommit
+--
+-- Checks whether or not this is an empty commit. If it is, there is no need
+-- to do any pre-commit check, so exit with success.
+--
+checkEmptyCommit :: IO ()
+checkEmptyCommit =
+    system "git diff --quiet --staged" >>=
+        \case
+            ExitSuccess   -> exitSuccess
+            ExitFailure _ -> return ()
 
 stashSave :: IO ()
 stashSave = system' "git stash --quiet --keep-index --include-untracked"
@@ -87,6 +122,9 @@ langCheckers = [ LangChecker "hlint" "*.hs" "Running hlint..." ]
 
 main :: IO ()
 main =
+    checkFirstCommit >>
+    checkEmptyCommit >>
+
     stashSave >>
 
     forM_ checkers (
