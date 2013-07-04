@@ -1,4 +1,4 @@
-GHC_FLAGS="-v0 -Wall -Werror"
+GHC_FLAGS="-v0" # -Wall -Werror
 
 redo-ifchange pre-commit.hs
 

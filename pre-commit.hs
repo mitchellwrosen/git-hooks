@@ -5,7 +5,7 @@ module Main where
 import Debug.Trace
 
 import Control.Monad (forM_)
-import System.Exit (ExitCode(..), exitFailure, exitSuccess)
+import System.Exit (ExitCode(..), exitWith, exitSuccess)
 import System.IO (stderr)
 import System.Process (readProcessWithExitCode, system)
 import Text.Printf (hPrintf, printf)
@@ -14,20 +14,25 @@ traceShow' :: Show a => a -> a
 traceShow' a = traceShow a a
 
 hookFailedBanner :: [String]
-hookFailedBanner = [ "######################"
-                   , "PRE-COMMIT HOOK FAILED"
-                   , "######################"
+hookFailedBanner = [ "####################################################"
+                   , "#                                                  #"
+                   , "# PRE-COMMIT HOOK FAILED                           #"
+                   , "#                                                  #"
+                   , "# There is a way to bypass this hook, but I won't  #"
+                   , "# tell you what it is, because you should only use #"
+                   , "# it if you know what you are doing.               #"
+                   , "#                                                  #"
+                   , "####################################################"
                    ]
 
--- exitFailure' command exit_code
+-- exitFailure' exit_code
 --
--- Prints a failure message to stderr and then exits.
+-- Prints a failure banner to stderr and then exits.
 --
-exitFailure' :: String -> Int -> IO a
-exitFailure' command exit_code = hPrintf stderr msg >> exitFailure
-  where
-    msg = unlines $ hookFailedBanner ++
-                    [ printf "'%s' failed with exit code %d" command exit_code ]
+exitFailure' :: Int -> IO a
+exitFailure' exit_code =
+    hPrintf stderr (unlines hookFailedBanner) >>
+    exitWith (ExitFailure exit_code)
 
 -- system' command
 --
@@ -37,8 +42,8 @@ system' :: String -> IO ()
 system' command = do
    system command >>=
       \case
-         ExitFailure exit_code -> exitFailure' command exit_code
          ExitSuccess           -> return ()
+         ExitFailure exit_code -> exitFailure' exit_code
 
 -- check command
 --
@@ -50,7 +55,7 @@ check command = do
    system command >>=
       \case
          ExitSuccess           -> return ()
-         ExitFailure exit_code -> stashApply >> exitFailure' command exit_code
+         ExitFailure exit_code -> stashApply >> exitFailure' exit_code
 
 -- readProcess' command args input
 --
@@ -62,33 +67,37 @@ readProcess' command args input = do
     readProcessWithExitCode command args input >>=
         \case
             (ExitSuccess,           out, _) -> return out
-            (ExitFailure exit_code, _,   _) -> exitFailure' command' exit_code
-        where command' = concat [ command
-                                , unwords args
-                                , " << "
-                                , input
-                                ]
+            (ExitFailure exit_code, _,   _) ->
+                putStrLn command' >>
+                exitFailure' exit_code
+          where
+            command' :: String
+            command' = concat [ command, unwords args, " << ", input ]
 
 -- checkFirstCommit
 --
 -- Checks to see if this is the first commit to the repository, and fail with a
 -- helpful error message if so.
+--
 checkFirstCommit :: IO ()
 checkFirstCommit =
     system "git rev-parse --verify HEAD >/dev/null 2>&1" >>=
         \case
             ExitSuccess -> return ()
-            ExitFailure _ -> putStrLn $
-                unlines $ hookFailedBanner ++
-                          [ "Many pre-commit checks rely on a valid HEAD,"
-                          , "so the Easy Way Out is to disable this hook"
-                          , "for your first commit."
-                          , ""
-                          , "Know that this commit will go unchecked, and"
-                          , "with great power comes great responsibility..."
-                          , ""
-                          , "(use git commit --no-verify)"
-                          ]
+            ExitFailure exit_code ->
+                (putStrLn . unlines)
+                    [ " *"
+                    , " * Many pre-commit checks rely on a valid HEAD,"
+                    , " * so the Easy Way Out is to disable this hook"
+                    , " * for your first commit."
+                    , " *"
+                    , " * Know that this commit will go unchecked, and"
+                    , " * with great power comes great responsibility..."
+                    , " *"
+                    , " *     git commit --no-verify"
+                    , " *"
+                    ] >>
+                exitFailure' exit_code
 
 -- checkEmptyCommit
 --
@@ -103,21 +112,21 @@ checkEmptyCommit =
             ExitFailure _ -> return ()
 
 stashSave :: IO ()
-stashSave = system' "git stash --keep-index --include-untracked"
+stashSave = system' "git stash --keep-index --include-untracked --quiet"
 
 stashApply :: IO ()
 stashApply = -- system' "git reset --quiet --hard" >>
-             system' "git stash pop --index"
+             system' "git stash pop --index --quiet"
 
 -- Checker command output
 data Checker = Checker String String
 
 checkers :: [Checker]
-checkers = [ Checker ".git-hooks/check_on_master.sh"       "Checking current branch..."
-           , Checker ".git-hooks/check_ascii_filenames.sh" "Checking for non-ascii filenames..."
-           , Checker ".git-hooks/check_whitespace.sh"      "Checking for bad whitespace..."
-           , Checker "./run_tests.sh"                      "Running run_tests.sh..."
-           , Checker "redo pre-commit"                     "Compiling..."
+checkers = [ Checker ".git-hooks/check_on_master.sh"        "Checking current branch..."
+           , Checker ".git-hooks/check_ascii_filenames.sh"  "Checking for non-ascii filenames..."
+           , Checker "git diff-index --cached --check HEAD" "Checking for bad whitespace..."
+           , Checker "redo pre-commit"                      "Building..."
+           , Checker "./run_tests.sh"                       "Running run_tests.sh..."
            ]
 
 -- LangChecker command pattern output
@@ -130,7 +139,7 @@ main :: IO ()
 main =
     checkFirstCommit >>
     checkEmptyCommit >>
-    stashSave >>
+    stashSave        >>
 
     forM_ checkers (
         \(Checker command output) ->
