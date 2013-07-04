@@ -103,17 +103,18 @@ checkEmptyCommit =
             ExitFailure _ -> return ()
 
 stashSave :: IO ()
-stashSave = system' "git stash --quiet --keep-index --include-untracked"
+stashSave = system' "git stash --keep-index --include-untracked"
 
 stashApply :: IO ()
 stashApply = -- system' "git reset --quiet --hard" >>
-             system' "git stash pop --quiet --index"
+             system' "git stash pop --index"
 
 -- Checker command output
 data Checker = Checker String String
 
 checkers :: [Checker]
-checkers = [ Checker ".git-hooks/check_ascii_filenames.sh" "Checking for non-ascii filenames..."
+checkers = [ Checker ".git-hooks/check_on_master.sh"       "Checking current branch..."
+           , Checker ".git-hooks/check_ascii_filenames.sh" "Checking for non-ascii filenames..."
            , Checker ".git-hooks/check_whitespace.sh"      "Checking for bad whitespace..."
            , Checker "./run_tests.sh"                      "Running run_tests.sh..."
            , Checker "redo pre-commit"                     "Compiling..."
