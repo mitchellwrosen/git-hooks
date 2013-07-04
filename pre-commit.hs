@@ -15,6 +15,12 @@ import System.Process
    )
 import Text.Printf (hPrintf, printf)
 
+hookFailedBanner :: [String]
+hookFailedBanner = [ "######################"
+                   , "PRE-COMMIT HOOK FAILED"
+                   , "######################"
+                   ]
+
 -- exitFailure' command exit_code
 --
 -- Prints a failure message to stderr and then exits.
@@ -22,11 +28,8 @@ import Text.Printf (hPrintf, printf)
 exitFailure' :: String -> Int -> IO a
 exitFailure' command exit_code = hPrintf stderr msg >> exitFailure
   where
-    msg = unlines [ "######################"
-                  , "PRE-COMMIT HOOK FAILED"
-                  , "######################"
-                  , printf "'%s' failed with exit code %d" command exit_code
-                  ]
+    msg = unlines $ hookFailedBanner ++
+                    [ printf "'%s' failed with exit code %d" command exit_code ]
 
 -- system' command
 --
@@ -73,18 +76,16 @@ checkFirstCommit =
         \case
             ExitSuccess -> return ()
             ExitFailure _ -> putStrLn $
-                unlines [ "######################"
-                        , "PRE-COMMIT HOOK FAILED"
-                        , "######################"
-                        , "Many pre-commit checks rely on a valid HEAD,"
-                        , "so the Easy Way Out is to disable this hook"
-                        , "for your first commit."
-                        , ""
-                        , "Know that this commit will go unchecked, and"
-                        , "with great power comes great responsibility..."
-                        , ""
-                        , "(use git commit --no-verify)"
-                        ]
+                unlines $ hookFailedBanner ++
+                          [ "Many pre-commit checks rely on a valid HEAD,"
+                          , "so the Easy Way Out is to disable this hook"
+                          , "for your first commit."
+                          , ""
+                          , "Know that this commit will go unchecked, and"
+                          , "with great power comes great responsibility..."
+                          , ""
+                          , "(use git commit --no-verify)"
+                          ]
 
 -- checkEmptyCommit
 --
@@ -102,20 +103,21 @@ stashSave :: IO ()
 stashSave = system' "git stash --quiet --keep-index --include-untracked"
 
 stashApply :: IO ()
-stashApply = -- system' "git reset --quiet --hard" >> -- TODO: uncomment
+stashApply = -- system' "git reset --quiet --hard" >>
              system' "git stash pop --quiet --index"
 
 -- Checker command output
 data Checker = Checker String String
 
+checkers :: [Checker]
+checkers = [ Checker ".git-hooks/check_ascii_filenames.sh" "Checking for non-ascii filenames..."
+           , Checker ".git-hooks/check_whitespace.sh"      "Checking for bad whitespace..."
+           , Checker "./run_tests.sh"                      "Running run_tests.sh..."
+           , Checker "ghc -Werror pre-commit.hs"           "Compiling..."
+           ]
+
 -- LangChecker command pattern output
 data LangChecker = LangChecker String String String
-
-checkers :: [Checker]
-checkers = [ Checker "./run_tests.sh"                      "Running run_tests.sh..."
-           , Checker ".git-hooks/check_ascii_filenames.sh" "Checking for non-ascii filenames..."
-           , Checker ".git-hooks/check_whitespace.sh"      "Checking for bad whitespace..."
-           ]
 
 langCheckers :: [LangChecker]
 langCheckers = [ LangChecker "hlint" "*.hs" "Running hlint..." ]
