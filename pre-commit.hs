@@ -15,7 +15,6 @@ import System.Process
    )
 import Text.Printf (hPrintf, printf)
 
-
 -- exitFailure' command exit_code
 --
 -- Prints a failure message to stderr and then exits.
@@ -64,27 +63,27 @@ readProcess' command args input= do
             (ExitFailure exit_code, out, err) -> exitFailure' command exit_code
             (ExitSuccess, out, _)             -> return out
 
--- toplevel
---
--- Gets the root directory of the current git repository.
---
-topLevel :: IO String
-topLevel = rstrip <$> readProcess' "git" ["rev-parse", "--show-toplevel"] []
-
 stashSave :: IO ()
-stashSave = system' "git stash --keep-index --include-untracked --quiet"
+stashSave = system' "git stash --quiet --keep-index --include-untracked"
 
 stashApply :: IO ()
-stashApply = system' "git reset --hard --quiet" >>
-             system' "git stash pop --index --quiet"
+stashApply = -- system' "git reset --quiet --hard" >> -- TODO: uncomment
+             system' "git stash pop --quiet --index"
 
 -- Checker command output
 data Checker = Checker String String
-data PresubmitCheck = Check     Checker
-                    | LangCheck Checker String
+
+-- LangChecker command pattern output
+data LangChecker = LangChecker String String String
 
 checkers :: [Checker]
-checkers = [ Checker "./run_tests.sh" "Running run_tests.sh..." ]
+checkers = [ Checker "./run_tests.sh"                      "Running run_tests.sh..."
+           , Checker ".git-hooks/check_ascii_filenames.sh" "Checking for non-ascii filenames..."
+           , Checker ".git-hooks/check_whitespace.sh"      "Checking for bad whitespace..."
+           ]
+
+langCheckers :: [LangChecker]
+langCheckers = [ LangChecker "hlint" "*.hs" "Running hlint..." ]
 
 main :: IO ()
 main =
@@ -95,5 +94,7 @@ main =
             putStrLn output >>
             check command
     ) >>
+
+    putStrLn "Presubmit checks passed." >>
 
     stashApply
