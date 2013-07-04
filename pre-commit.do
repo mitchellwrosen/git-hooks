@@ -1,3 +1,5 @@
+GHC_FLAGS="-v0 -Wall -Werror"
+
 redo-ifchange pre-commit.hs
-ghc -v0 -o $3 pre-commit.hs
-cp pre-commit .git/hooks
+
+ghc $GHC_FLAGS -o $3 pre-commit.hs

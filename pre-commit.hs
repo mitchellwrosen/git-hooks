@@ -2,17 +2,10 @@
 
 module Main where
 
-import Control.Applicative ((<$>))
-import Control.Monad (forM_, unless)
-import Data.String.Utils (rstrip)
-import System.Directory (doesFileExist)
+import Control.Monad (forM_)
 import System.Exit (ExitCode(..), exitFailure, exitSuccess)
-import System.FilePath ((</>))
-import System.IO (Handle, stderr)
-import System.Process
-   ( StdStream(..)
-   , createProcess, readProcessWithExitCode, shell, std_out, system, waitForProcess
-   )
+import System.IO (stderr)
+import System.Process (readProcessWithExitCode, system)
 import Text.Printf (hPrintf, printf)
 
 hookFailedBanner :: [String]
@@ -63,8 +56,8 @@ readProcess' :: String -> [String] -> String -> IO String
 readProcess' command args input= do
     readProcessWithExitCode command args input >>=
         \case
-            (ExitSuccess, out, _)             -> return out
-            (ExitFailure exit_code, out, err) -> exitFailure' command exit_code
+            (ExitSuccess,           out, _) -> return out
+            (ExitFailure exit_code, _,   _) -> exitFailure' command exit_code
 
 -- checkFirstCommit
 --
@@ -113,7 +106,7 @@ checkers :: [Checker]
 checkers = [ Checker ".git-hooks/check_ascii_filenames.sh" "Checking for non-ascii filenames..."
            , Checker ".git-hooks/check_whitespace.sh"      "Checking for bad whitespace..."
            , Checker "./run_tests.sh"                      "Running run_tests.sh..."
-           , Checker "ghc -Werror pre-commit.hs"           "Compiling..."
+           , Checker "redo pre-commit"                     "Compiling..."
            ]
 
 -- LangChecker command pattern output
@@ -126,7 +119,6 @@ main :: IO ()
 main =
     checkFirstCommit >>
     checkEmptyCommit >>
-
     stashSave >>
 
     forM_ checkers (
