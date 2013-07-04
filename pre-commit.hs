@@ -2,11 +2,16 @@
 
 module Main where
 
+import Debug.Trace
+
 import Control.Monad (forM_)
 import System.Exit (ExitCode(..), exitFailure, exitSuccess)
 import System.IO (stderr)
 import System.Process (readProcessWithExitCode, system)
 import Text.Printf (hPrintf, printf)
+
+traceShow' :: Show a => a -> a
+traceShow' a = traceShow a a
 
 hookFailedBanner :: [String]
 hookFailedBanner = [ "######################"
@@ -53,11 +58,16 @@ check command = do
 -- exiting on failure.
 --
 readProcess' :: String -> [String] -> String -> IO String
-readProcess' command args input= do
+readProcess' command args input = do
     readProcessWithExitCode command args input >>=
         \case
             (ExitSuccess,           out, _) -> return out
-            (ExitFailure exit_code, _,   _) -> exitFailure' command exit_code
+            (ExitFailure exit_code, _,   _) -> exitFailure' command' exit_code
+        where command' = concat [ command
+                                , unwords args
+                                , " << "
+                                , input
+                                ]
 
 -- checkFirstCommit
 --
@@ -113,7 +123,7 @@ checkers = [ Checker ".git-hooks/check_ascii_filenames.sh" "Checking for non-asc
 data LangChecker = LangChecker String String String
 
 langCheckers :: [LangChecker]
-langCheckers = [ LangChecker "hlint" "*.hs" "Running hlint..." ]
+langCheckers = [ ] -- LangChecker "hlint" "\\.hs$" "Running hlint..." ]
 
 main :: IO ()
 main =
@@ -125,6 +135,14 @@ main =
         \(Checker command output) ->
             putStrLn output >>
             check command
+    ) >>
+
+    forM_ langCheckers (
+        \(LangChecker command pattern output) ->
+            putStrLn output >>
+            readProcess' "git" ["diff", "--staged", "--name-only", "--diff-filter=ACM"] [] >>=
+            readProcess' "grep" [pattern] >>=
+            mapM_ (check . printf "%s %s" command) . lines
     ) >>
 
     putStrLn "Presubmit checks passed." >>
