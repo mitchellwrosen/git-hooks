@@ -5,6 +5,7 @@ module Main where
 import Debug.Trace
 
 import Control.Monad (forM_)
+import Data.String.Utils (join)
 import System.Exit (ExitCode(..), exitWith, exitSuccess)
 import System.IO (stderr)
 import System.Process (readProcessWithExitCode, system)
@@ -45,13 +46,13 @@ system' command = do
          ExitSuccess           -> return ()
          ExitFailure exit_code -> exitFailure' exit_code
 
--- check command
+-- execute command
 --
 -- Runs "command" as a shell command, applying the saved stash and exiting on
 -- ExitFailure.
 --
-check :: String -> IO ()
-check command = do
+execute :: String -> IO ()
+execute command = do
    system command >>=
       \case
          ExitSuccess           -> return ()
@@ -118,22 +119,52 @@ stashApply :: IO ()
 stashApply = -- system' "git reset --quiet --hard" >>
              system' "git stash pop --index --quiet"
 
--- Checker command output
-data Checker = Checker String String
+data Checker =
+    -- A command that runs with no input file, for repository-scope sanity
+    -- checks such as
+    --
+    --      - Attempting to commit to master
+    --      - Existence of non-ascii filenames
+    --      - Offending whitespace
+    --      - Non-compiling code
+    --      - Failed test(s)
+    --
+    RepoChecker String -- The string to print before running the check.
+                String -- The command to run.
+
+    -- A command that runs on each file being committed, for file-scope sanity
+    -- checks such as
+    --
+    --      - Linters
+    --      - Existence of TODO/FIXME
+    --      - Logging, debugging, printfs, console.log(), etc.
+    --
+  | FileChecker String   -- The string to print before running the check.
+                String   -- The command to run.
+                [String] -- The patterns to match filenames with.
 
 checkers :: [Checker]
-checkers = [ Checker ".git-hooks/check_on_master.sh"        "Checking current branch..."
-           , Checker ".git-hooks/check_ascii_filenames.sh"  "Checking for non-ascii filenames..."
-           , Checker "git diff-index --cached --check HEAD" "Checking for bad whitespace..."
-           , Checker "redo pre-commit"                      "Building..."
-           , Checker "./run_tests.sh"                       "Running run_tests.sh..."
-           ]
+checkers =
+    [ RepoChecker "Checking current branch..."          ".git-hooks/check_on_master.sh"
+    , RepoChecker "Checking for non-ascii filenames..." ".git-hooks/check_ascii_filenames.sh"
+    , RepoChecker "Checking for bad whitespace..."      "git diff-index --cached --check HEAD"
 
--- LangChecker command pattern output
-data LangChecker = LangChecker String String String
+    {-, FileChecker "Running hlint..."                    "hlint" ["\\.hs$"]-}
 
-langCheckers :: [LangChecker]
-langCheckers = [ ] -- LangChecker "hlint" "\\.hs$" "Running hlint..." ]
+    , RepoChecker "Building..."                         "redo pre-commit"
+    , RepoChecker "Running run_tests.sh..."             "./run_tests.sh"
+    ]
+
+check :: Checker -> IO ()
+check (RepoChecker output command) = putStrLn output >> execute command
+check (FileChecker output command patterns) =
+    putStrLn output >>
+    readProcess' "git"
+                 (words "diff --staged --name-only --diff-filter=ACM")
+                 [] >>=
+    readProcess' "grep"
+                 [join "\\|" patterns] >>=
+    mapM_ (execute . printf "%s %s" command) . lines
 
 main :: IO ()
 main =
@@ -141,20 +172,7 @@ main =
     checkEmptyCommit >>
     stashSave        >>
 
-    forM_ checkers (
-        \(Checker command output) ->
-            putStrLn output >>
-            check command
-    ) >>
-
-    forM_ langCheckers (
-        \(LangChecker command pattern output) ->
-            putStrLn output >>
-            readProcess' "git" ["diff", "--staged", "--name-only", "--diff-filter=ACM"] [] >>=
-            readProcess' "grep" [pattern] >>=
-            mapM_ (check . printf "%s %s" command) . lines
-    ) >>
-
+    mapM_ check checkers >>
     putStrLn "Presubmit checks passed." >>
 
     stashApply
