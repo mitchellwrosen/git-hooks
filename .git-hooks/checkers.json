@@ -1,0 +1,27 @@
+[
+   {
+      "command" : ".git-hooks/check_on_master.sh",
+      "output"  : "Checking current branch..."
+   },
+   {
+      "command" : ".git-hooks/check_ascii_filenames.sh",
+      "output"  : "Checking for non-ascii filenames..."
+   },
+   {
+      "command" : "git diff-index --cached --check HEAD",
+      "output"  : "Checking for bad whitespace..."
+   },
+   {
+      "command"  : "hlint",
+      "patterns" : [ "\\.hs$" ],
+      "output"   : "Running hlint..."
+   },
+   {
+      "command" : "redo pre-commit",
+      "output"  : "Building..."
+   },
+   {
+      "command" : "./run_tests.sh",
+      "output"  : "Running tests..."
+   }
+]

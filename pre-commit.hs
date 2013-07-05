@@ -1,15 +1,20 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE LambdaCase, OverloadedStrings #-}
 
 module Main where
 
 import Debug.Trace
 
+import Control.Applicative ((<$>), (<*>))
 import Control.Monad (forM_)
+import Data.Aeson (FromJSON, Value(..), parseJSON, (.:), (.:?), eitherDecode')
+import Data.Char (toLower)
 import Data.String.Utils (join)
-import System.Exit (ExitCode(..), exitWith, exitSuccess)
-import System.IO (stderr)
+import System.Exit (ExitCode(..), exitFailure, exitSuccess, exitWith)
+import System.IO (hPutStrLn, stderr)
 import System.Process (readProcessWithExitCode, system)
 import Text.Printf (hPrintf, printf)
+
+import qualified Data.ByteString.Lazy as B
 
 traceShow' :: Show a => a -> a
 traceShow' a = traceShow a a
@@ -119,60 +124,74 @@ stashApply :: IO ()
 stashApply = -- system' "git reset --quiet --hard" >>
              system' "git stash pop --index --quiet"
 
-data Checker =
-    -- A command that runs with no input file, for repository-scope sanity
-    -- checks such as
-    --
-    --      - Attempting to commit to master
-    --      - Existence of non-ascii filenames
-    --      - Offending whitespace
-    --      - Non-compiling code
-    --      - Failed test(s)
-    --
-    RepoChecker String -- The string to print before running the check.
-                String -- The command to run.
+-- A Checker represents a program that runs with either no arguments or one
+-- argument (a filename), returning a non-zero exit code on failure.
+--
+-- No-argument checkers have no patterns to match (chPatterns is Nothing). They
+-- are for repository-scope sanity checks such as
+--
+--      - Attempting to commit to master
+--      - Existence of non-ascii filenames
+--      - Offending whitespace
+--      - Non-compiling code
+--      - Failing test(s)
+--
+-- Single-argument checkers have a list of patterns to match (chPatterns is Just
+-- patterns), and are run on each matching file being committed. They are for
+-- file-scope sanity checks such as
+--
+--      - Linters
+--      - Existence of TODO/FIXME
+--      - Logging, debugging, printfs, console.log(), etc.
+--
+data Checker = Checker
+    { chCommand  :: String
+    , chOutput   :: String
+    , chPatterns :: Maybe [String]
+    , chOnFail   :: Maybe String
+    }
 
-    -- A command that runs on each file being committed, for file-scope sanity
-    -- checks such as
-    --
-    --      - Linters
-    --      - Existence of TODO/FIXME
-    --      - Logging, debugging, printfs, console.log(), etc.
-    --
-  | FileChecker String   -- The string to print before running the check.
-                String   -- The command to run.
-                [String] -- The patterns to match filenames with.
-
-checkers :: [Checker]
-checkers =
-    [ RepoChecker "Checking current branch..."          ".git-hooks/check_on_master.sh"
-    , RepoChecker "Checking for non-ascii filenames..." ".git-hooks/check_ascii_filenames.sh"
-    , RepoChecker "Checking for bad whitespace..."      "git diff-index --cached --check HEAD"
-
-    {-, FileChecker "Running hlint..."                    "hlint" ["\\.hs$"]-}
-
-    , RepoChecker "Building..."                         "redo pre-commit"
-    , RepoChecker "Running run_tests.sh..."             "./run_tests.sh"
-    ]
+instance FromJSON Checker where
+    parseJSON (Object o) = Checker          <$>
+                           o .:  "command"  <*>
+                           o .:  "output"   <*>
+                           o .:? "patterns" <*>
+                           o .:? "on_fail"
 
 check :: Checker -> IO ()
-check (RepoChecker output command) = putStrLn output >> execute command
-check (FileChecker output command patterns) =
+check (Checker command output patterns on_fail) =
     putStrLn output >>
-    readProcess' "git"
-                 (words "diff --staged --name-only --diff-filter=ACM")
-                 [] >>=
-    readProcess' "grep"
-                 [join "\\|" patterns] >>=
-    mapM_ (execute . printf "%s %s" command) . lines
+    case patterns of
+        -- File-scope sanity checks.
+        Just patterns ->
+            readProcess'
+                "git"                                                 -- command
+                (words "diff --staged --name-only --diff-filter=ACM") -- arguments
+                [] >>=                                                -- input
+            readProcess'
+                "grep"                                                -- command
+                [join "\\|" patterns] >>=                             -- arguments
+            mapM_ (execute . printf "%s %s" command) . lines
+        -- Repository-scope sanity checks.
+        Nothing -> execute command
 
 main :: IO ()
 main =
+    readCheckers >>= \checkers ->
+
     checkFirstCommit >>
     checkEmptyCommit >>
     stashSave        >>
 
     mapM_ check checkers >>
+
     putStrLn "Presubmit checks passed." >>
 
     stashApply
+  where
+    readCheckers :: IO [Checker]
+    readCheckers =
+        B.readFile ".git-hooks/checkers.json" >>= \contents ->
+        case eitherDecode' contents of
+            Right checkers -> return checkers
+            Left  err      -> hPutStrLn stderr err >> exitFailure
