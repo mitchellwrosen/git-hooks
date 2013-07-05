@@ -9,6 +9,7 @@ import Control.Monad (forM_)
 import Data.Aeson (FromJSON, Value(..), parseJSON, (.:), (.:?), eitherDecode')
 import Data.Char (toLower)
 import Data.String.Utils (join)
+import System.Environment (getArgs)
 import System.Exit (ExitCode(..), exitFailure, exitSuccess, exitWith)
 import System.IO (hPutStrLn, stderr)
 import System.Process (readProcessWithExitCode, system)
@@ -175,9 +176,18 @@ check (Checker command output patterns on_fail) =
         -- Repository-scope sanity checks.
         Nothing -> execute command
 
+safeHead :: [a] -> Maybe a
+safeHead []     = Nothing
+safeHead (x:xs) = Just x
+
+maybe' :: a -> Maybe a -> a
+maybe' a Nothing  = a
+maybe' _ (Just a) = a
+
 main :: IO ()
 main =
-    readCheckers >>= \checkers ->
+    getArgs >>= \args ->
+    readCheckers (maybe' ".git-hooks/checkers.json" $ safeHead args) >>= \checkers ->
 
     checkFirstCommit >>
     checkEmptyCommit >>
@@ -189,9 +199,9 @@ main =
 
     stashApply
   where
-    readCheckers :: IO [Checker]
-    readCheckers =
-        B.readFile ".git-hooks/checkers.json" >>= \contents ->
+    readCheckers :: String -> IO [Checker]
+    readCheckers checkersFile =
+        B.readFile checkersFile >>= \contents ->
         case eitherDecode' contents of
             Right checkers -> return checkers
             Left  err      -> hPutStrLn stderr err >> exitFailure
