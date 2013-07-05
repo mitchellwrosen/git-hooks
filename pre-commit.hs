@@ -5,11 +5,10 @@ module Main where
 import Debug.Trace
 
 import Control.Applicative ((<$>), (<*>))
-import Control.Monad (forM_)
+import Control.Monad (mzero, when)
 import Data.Aeson (FromJSON, Value(..), parseJSON, (.:), (.:?), eitherDecode')
-import Data.Char (toLower)
+import Data.Maybe (fromJust, isJust)
 import Data.String.Utils (join)
-import System.Environment (getArgs)
 import System.Exit (ExitCode(..), exitFailure, exitSuccess, exitWith)
 import System.IO (hPutStrLn, stderr)
 import System.Process (readProcessWithExitCode, system)
@@ -52,17 +51,24 @@ system' command = do
          ExitSuccess           -> return ()
          ExitFailure exit_code -> exitFailure' exit_code
 
--- execute command
+-- execute on_fail command
 --
--- Runs "command" as a shell command, applying the saved stash and exiting on
--- ExitFailure.
+-- Runs "command" as a shell command. In the case of ExitFailure, print
+-- |on_fail| (if not Nothing), apply the saved stash, and exit.
 --
-execute :: String -> IO ()
-execute command = do
+-- The main difference between this function and system' is this function is
+-- used for commands that are run after saving a stash (it calls stashApply).
+-- There may be a clean way to abstract out the common functionality.
+--
+execute :: Maybe String -> String -> IO ()
+execute on_fail command = do
    system command >>=
       \case
          ExitSuccess           -> return ()
-         ExitFailure exit_code -> stashApply >> exitFailure' exit_code
+         ExitFailure exit_code ->
+            when (isJust on_fail) (hPutStrLn stderr $ fromJust on_fail) >>
+            stashApply >>
+            exitFailure' exit_code
 
 -- readProcess' command args input
 --
@@ -158,11 +164,17 @@ instance FromJSON Checker where
                            o .:  "output"   <*>
                            o .:? "patterns" <*>
                            o .:? "on_fail"
+    parseJSON _ = mzero
 
+-- check checker
+--
+-- Runs checker, inspecting |patterns| to determine if it's a repo-scope or
+-- file-scope checker.
+--
 check :: Checker -> IO ()
-check (Checker command output patterns on_fail) =
+check (Checker command output maybe_patterns maybe_on_fail) =
     putStrLn output >>
-    case patterns of
+    case maybe_patterns of
         -- File-scope sanity checks.
         Just patterns ->
             readProcess'
@@ -172,36 +184,25 @@ check (Checker command output patterns on_fail) =
             readProcess'
                 "grep"                                                -- command
                 [join "\\|" patterns] >>=                             -- arguments
-            mapM_ (execute . printf "%s %s" command) . lines
+            mapM_ (execute maybe_on_fail . printf "%s %s" command) . lines
         -- Repository-scope sanity checks.
-        Nothing -> execute command
-
-safeHead :: [a] -> Maybe a
-safeHead []     = Nothing
-safeHead (x:xs) = Just x
-
-maybe' :: a -> Maybe a -> a
-maybe' a Nothing  = a
-maybe' _ (Just a) = a
+        Nothing -> execute maybe_on_fail command
 
 main :: IO ()
 main =
-    getArgs >>= \args ->
-    readCheckers (maybe' ".git-hooks/checkers.json" $ safeHead args) >>= \checkers ->
+    readCheckers >>= \checkers ->
 
-    checkFirstCommit >>
-    checkEmptyCommit >>
-    stashSave        >>
-
-    mapM_ check checkers >>
-
+    checkFirstCommit                    >>
+    checkEmptyCommit                    >>
+    stashSave                           >>
+    mapM_ check checkers                >>
     putStrLn "Presubmit checks passed." >>
-
     stashApply
+
   where
-    readCheckers :: String -> IO [Checker]
-    readCheckers checkersFile =
-        B.readFile checkersFile >>= \contents ->
+    readCheckers :: IO [Checker]
+    readCheckers =
+        B.readFile ".git-hooks/checkers.json" >>= \contents ->
         case eitherDecode' contents of
             Right checkers -> return checkers
             Left  err      -> hPutStrLn stderr err >> exitFailure

@@ -1,4 +1,4 @@
-GHC_FLAGS="-v0" # -Wall -Werror
+GHC_FLAGS="-v0 -Wall -Werror -hidir obj -odir obj"
 
 redo-ifchange pre-commit.hs
 
