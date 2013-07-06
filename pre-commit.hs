@@ -4,17 +4,18 @@ module Main where
 
 import Debug.Trace
 
+import System.Extras
+
 import Control.Applicative ((<$>), (<*>))
-import Control.Monad (mzero, when)
+import Control.Monad.Error
 import Data.Aeson (FromJSON, Value(..), parseJSON, (.:), (.:?), eitherDecode')
-import Data.Maybe (fromJust, isJust)
-import Data.String.Utils (join)
 import System.Exit (ExitCode(..), exitFailure, exitSuccess, exitWith)
-import System.IO (hPutStrLn, stderr)
-import System.Process (readProcessWithExitCode, system)
-import Text.Printf (hPrintf, printf)
+import System.IO (hPutStrLn, stderr, stdout)
+import System.Process (system)
+import Text.Printf (printf)
 
 import qualified Data.ByteString.Lazy as B
+import qualified Data.String.Utils    as S
 
 traceShow' :: Show a => a -> a
 traceShow' a = traceShow a a
@@ -31,61 +32,6 @@ hookFailedBanner = [ "####################################################"
                    , "####################################################"
                    ]
 
--- exitFailure' exit_code
---
--- Prints a failure banner to stderr and then exits.
---
-exitFailure' :: Int -> IO a
-exitFailure' exit_code =
-    hPrintf stderr (unlines hookFailedBanner) >>
-    exitWith (ExitFailure exit_code)
-
--- system' command
---
--- Runs "command" as a shell command, exiting on ExitFailure.
---
-system' :: String -> IO ()
-system' command = do
-   system command >>=
-      \case
-         ExitSuccess           -> return ()
-         ExitFailure exit_code -> exitFailure' exit_code
-
--- execute on_fail command
---
--- Runs "command" as a shell command. In the case of ExitFailure, print
--- |on_fail| (if not Nothing), apply the saved stash, and exit.
---
--- The main difference between this function and system' is this function is
--- used for commands that are run after saving a stash (it calls stashApply).
--- There may be a clean way to abstract out the common functionality.
---
-execute :: Maybe String -> String -> IO ()
-execute on_fail command = do
-   system command >>=
-      \case
-         ExitSuccess           -> return ()
-         ExitFailure exit_code ->
-            when (isJust on_fail) (hPutStrLn stderr $ fromJust on_fail) >>
-            stashApply >>
-            exitFailure' exit_code
-
--- readProcess' command args input
---
--- Runs |command| with |args| and |input|, returning the standard output, or
--- exiting on failure.
---
-readProcess' :: String -> [String] -> String -> IO String
-readProcess' command args input = do
-    readProcessWithExitCode command args input >>=
-        \case
-            (ExitSuccess,           out, _) -> return out
-            (ExitFailure exit_code, _,   _) ->
-                putStrLn command' >>
-                exitFailure' exit_code
-          where
-            command' :: String
-            command' = concat [ command, unwords args, " << ", input ]
 
 -- checkFirstCommit
 --
@@ -98,7 +44,7 @@ checkFirstCommit =
         \case
             ExitSuccess -> return ()
             ExitFailure exit_code ->
-                (putStrLn . unlines)
+                (hPutStrLn stderr . unlines)
                     [ " *"
                     , " * Many pre-commit checks rely on a valid HEAD,"
                     , " * so the Easy Way Out is to disable this hook"
@@ -110,7 +56,7 @@ checkFirstCommit =
                     , " *     git commit --no-verify"
                     , " *"
                     ] >>
-                exitFailure' exit_code
+                exitWith (ExitFailure exit_code)
 
 -- checkEmptyCommit
 --
@@ -125,11 +71,18 @@ checkEmptyCommit =
             ExitFailure _ -> return ()
 
 stashSave :: IO ()
-stashSave = system' "git stash --keep-index --include-untracked --quiet"
+stashSave =
+    runErrorT (system' "git stash --keep-index --include-untracked --quiet") >>=
+        \case
+            Right _   -> return ()
+            Left  err -> hPutStrLn stderr err >> exitFailure
 
 stashApply :: IO ()
 stashApply = -- system' "git reset --quiet --hard" >>
-             system' "git stash pop --index --quiet"
+    runErrorT (system' "git stash pop --index --quiet") >>=
+        \case
+            Right _   -> return ()
+            Left  err -> hPutStrLn stderr err >> exitFailure
 
 -- A Checker represents a program that runs with either no arguments or one
 -- argument (a filename), returning a non-zero exit code on failure.
@@ -171,33 +124,32 @@ instance FromJSON Checker where
 -- Runs checker, inspecting |patterns| to determine if it's a repo-scope or
 -- file-scope checker.
 --
-check :: Checker -> IO ()
-check (Checker command output maybe_patterns maybe_on_fail) =
-    putStrLn output >>
+check :: Checker -> ErrorT String IO ()
+check (Checker command output maybe_patterns _) =
+    liftIO (putStrLn output) >>
     case maybe_patterns of
         -- File-scope sanity checks.
         Just patterns ->
-            readProcess'
-                "git"                                                 -- command
-                (words "diff --staged --name-only --diff-filter=ACM") -- arguments
-                [] >>=                                                -- input
-            readProcess'
-                "grep"                                                -- command
-                [join "\\|" patterns] >>=                             -- arguments
-            mapM_ (execute maybe_on_fail . printf "%s %s" command) . lines
+            readProcess' "git diff --staged --name-only --diff-filter=ACM" [] >>=
+            readProcess' ("grep" ++ S.join "\\|" patterns) >>=
+            mapM_ (system' . printf "%s %s" command) . lines
+
         -- Repository-scope sanity checks.
-        Nothing -> execute maybe_on_fail command
+        Nothing -> system' command
 
 main :: IO ()
 main =
     readCheckers >>= \checkers ->
 
-    checkFirstCommit                    >>
-    checkEmptyCommit                    >>
-    stashSave                           >>
-    mapM_ check checkers                >>
-    putStrLn "Presubmit checks passed." >>
-    stashApply
+    checkFirstCommit >>
+    checkEmptyCommit >>
+
+    stashSave >>
+    runErrorT (mapM_ check checkers) >>= \result ->
+        stashApply >>
+        case result of
+            Right () -> hPutStrLn stdout "Presubmit checks passed."           >> exitSuccess
+            Left err -> hPutStrLn stderr ("Presubmit checks failed: " ++ err) >> exitFailure
 
   where
     readCheckers :: IO [Checker]

@@ -12,11 +12,6 @@
       "output"  : "Checking for bad whitespace..."
    },
    {
-      "command"  : "echo",
-      "patterns" : [ "\\.hs$" ],
-      "output"   : "Running hlint..."
-   },
-   {
       "command" : "redo pre-commit",
       "output"  : "Building..."
    },
