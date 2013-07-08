@@ -1,94 +1,66 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE LambdaCase, OverloadedStrings #-}
 
 module Main where
 
 import Debug.Trace
 
-import Control.Monad (forM_)
-import System.Exit (ExitCode(..), exitFailure, exitSuccess)
-import System.IO (stderr)
-import System.Process (readProcessWithExitCode, system)
-import Text.Printf (hPrintf, printf)
+import System.Extras
+
+import Control.Applicative ((<$>), (<*>))
+import Control.Monad (forM_, mzero, unless)
+import Control.Monad.Trans (liftIO)
+import Control.Monad.Trans.Either (eitherT)
+import Data.Aeson (FromJSON, Value(..), parseJSON, (.:), (.:?), eitherDecode')
+import System.Exit (exitFailure, exitSuccess, exitWith)
+import System.IO (hPutStrLn, stderr, stdout)
+
+import qualified Data.ByteString.Lazy as B
+import qualified Data.String.Utils    as S
 
 traceShow' :: Show a => a -> a
 traceShow' a = traceShow a a
 
 hookFailedBanner :: [String]
-hookFailedBanner = [ "######################"
-                   , "PRE-COMMIT HOOK FAILED"
-                   , "######################"
+hookFailedBanner = [ "####################################################"
+                   , "#                                                  #"
+                   , "# PRE-COMMIT HOOK FAILED                           #"
+                   , "#                                                  #"
+                   , "# There is a way to bypass this hook, but I won't  #"
+                   , "# tell you what it is, because you should only use #"
+                   , "# it if you know what you are doing.               #"
+                   , "#                                                  #"
+                   , "####################################################"
                    ]
 
--- exitFailure' command exit_code
---
--- Prints a failure message to stderr and then exits.
---
-exitFailure' :: String -> Int -> IO a
-exitFailure' command exit_code = hPrintf stderr msg >> exitFailure
-  where
-    msg = unlines $ hookFailedBanner ++
-                    [ printf "'%s' failed with exit code %d" command exit_code ]
-
--- system' command
---
--- Runs "command" as a shell command, exiting on ExitFailure.
---
-system' :: String -> IO ()
-system' command = do
-   system command >>=
-      \case
-         ExitFailure exit_code -> exitFailure' command exit_code
-         ExitSuccess           -> return ()
-
--- check command
---
--- Runs "command" as a shell command, applying the saved stash and exiting on
--- ExitFailure.
---
-check :: String -> IO ()
-check command = do
-   system command >>=
-      \case
-         ExitSuccess           -> return ()
-         ExitFailure exit_code -> stashApply >> exitFailure' command exit_code
-
--- readProcess' command args input
---
--- Runs |command| with |args| and |input|, returning the standard output, or
--- exiting on failure.
---
-readProcess' :: String -> [String] -> String -> IO String
-readProcess' command args input = do
-    readProcessWithExitCode command args input >>=
-        \case
-            (ExitSuccess,           out, _) -> return out
-            (ExitFailure exit_code, _,   _) -> exitFailure' command' exit_code
-        where command' = concat [ command
-                                , unwords args
-                                , " << "
-                                , input
-                                ]
 
 -- checkFirstCommit
 --
 -- Checks to see if this is the first commit to the repository, and fail with a
 -- helpful error message if so.
+--
 checkFirstCommit :: IO ()
 checkFirstCommit =
-    system "git rev-parse --verify HEAD >/dev/null 2>&1" >>=
-        \case
-            ExitSuccess -> return ()
-            ExitFailure _ -> putStrLn $
-                unlines $ hookFailedBanner ++
-                          [ "Many pre-commit checks rely on a valid HEAD,"
-                          , "so the Easy Way Out is to disable this hook"
-                          , "for your first commit."
-                          , ""
-                          , "Know that this commit will go unchecked, and"
-                          , "with great power comes great responsibility..."
-                          , ""
-                          , "(use git commit --no-verify)"
-                          ]
+    eitherT onFailure onSuccess $
+        systemCall' "git" ["rev-parse", "--verify", "HEAD"]
+  where
+    onFailure :: CommandResult -> IO ()
+    onFailure (exit_code, _, _) =
+        (hPutStrLn stderr . unlines)
+            [ " *"
+            , " * Many pre-commit checks rely on a valid HEAD,"
+            , " * so the Easy Way Out is to disable this hook"
+            , " * for your first commit."
+            , " *"
+            , " * Know that this commit will go unchecked, and"
+            , " * with great power comes great responsibility..."
+            , " *"
+            , " *     git commit --no-verify"
+            , " *"
+            ] >>
+        exitWith exit_code
+
+    onSuccess :: CommandResult -> IO ()
+    onSuccess = const $ return ()
 
 -- checkEmptyCommit
 --
@@ -97,54 +69,105 @@ checkFirstCommit =
 --
 checkEmptyCommit :: IO ()
 checkEmptyCommit =
-    system "git diff --quiet --staged" >>=
-        \case
-            ExitSuccess   -> exitSuccess
-            ExitFailure _ -> return ()
+    eitherT (const $ return ()) (const exitSuccess) $
+        systemCall' "git" ["diff", "--staged", "--quiet"]
 
 stashSave :: IO ()
-stashSave = system' "git stash --quiet --keep-index --include-untracked"
+stashSave = fatalCall_ "git" (words "stash --keep-index --include-untracked --quiet") []
 
 stashApply :: IO ()
-stashApply = -- system' "git reset --quiet --hard" >>
-             system' "git stash pop --quiet --index"
+stashApply = -- fatalCall "git" (words "reset --hard --quiet") [] >>
+             fatalCall_ "git" (words "stash pop --index --quiet") []
 
--- Checker command output
-data Checker = Checker String String
+-- A Checker represents a program that runs with either no arguments or one
+-- argument (a filename), returning a non-zero exit code on failure.
+--
+-- No-argument checkers have no patterns to match (chPatterns is Nothing). They
+-- are for repository-scope sanity checks such as
+--
+--      - Attempting to commit to master
+--      - Existence of non-ascii filenames
+--      - Offending whitespace
+--      - Non-compiling code
+--      - Failing test(s)
+--
+-- Single-argument checkers have a list of patterns to match (chPatterns is Just
+-- patterns), and are run on each matching file being committed. They are for
+-- file-scope sanity checks such as
+--
+--      - Linters
+--      - Existence of TODO/FIXME
+--      - Logging, debugging, printfs, console.log(), etc.
+--
+data Checker = Checker
+    { chCommand  :: String
+    , chArgs     :: [String]
+    , chOutput   :: String
+    , chPatterns :: Maybe [String]
+    , chOnFail   :: Maybe String
+    }
 
-checkers :: [Checker]
-checkers = [ Checker ".git-hooks/check_ascii_filenames.sh" "Checking for non-ascii filenames..."
-           , Checker ".git-hooks/check_whitespace.sh"      "Checking for bad whitespace..."
-           , Checker "./run_tests.sh"                      "Running run_tests.sh..."
-           , Checker "redo pre-commit"                     "Compiling..."
-           ]
+instance FromJSON Checker where
+    parseJSON (Object o) = Checker          <$>
+                           o .:  "command"  <*>
+                           o .:  "args"     <*>
+                           o .:  "output"   <*>
+                           o .:? "patterns" <*>
+                           o .:? "on_fail"
+    parseJSON _ = mzero
 
--- LangChecker command pattern output
-data LangChecker = LangChecker String String String
+-- check checker
+--
+-- Runs checker, inspecting |patterns| to determine if it's a repo-scope or
+-- file-scope checker.
+--
+check :: Checker -> System ()
+-- File-scope sanity checks.
+check (Checker command args output (Just patterns) _) =
+    liftIO (fatalCall "git" ["diff", "--staged", "--name-only", "--diff-filter=ACM"] []) >>= \out ->
+    lines <$> liftIO (fatalCall "grep" [S.join "\\|" patterns] out) >>= \filenames ->
 
-langCheckers :: [LangChecker]
-langCheckers = [ ] -- LangChecker "hlint" "\\.hs$" "Running hlint..." ]
+    -- Don't print a checker's output unless at least one file matches
+    unless (null filenames) (liftIO $ hPutStrLn stdout output) >>
+
+    forM_ filenames (\filename ->
+        let
+            args' = args ++ [filename]
+        in
+            liftIO (hPutStrLn stdout ("   " ++ filename)) >>
+            systemCall' command args'
+    )
+
+-- Repository-scope sanity checks.
+check (Checker command args output Nothing _) =
+    liftIO (hPutStrLn stdout output) >>
+    systemCall' command args >>
+    return ()
 
 main :: IO ()
 main =
+    readCheckers >>= \checkers ->
+
     checkFirstCommit >>
     checkEmptyCommit >>
+
     stashSave >>
 
-    forM_ checkers (
-        \(Checker command output) ->
-            putStrLn output >>
-            check command
-    ) >>
+    eitherT onFailure onSuccess (mapM_ check checkers)
 
-    forM_ langCheckers (
-        \(LangChecker command pattern output) ->
-            putStrLn output >>
-            readProcess' "git" ["diff", "--staged", "--name-only", "--diff-filter=ACM"] [] >>=
-            readProcess' "grep" [pattern] >>=
-            mapM_ (check . printf "%s %s" command) . lines
-    ) >>
+  where
+    readCheckers :: IO [Checker]
+    readCheckers =
+        B.readFile ".git-hooks/checkers.json" >>= \contents ->
+        case eitherDecode' contents of
+            Right checkers -> return checkers
+            Left  err      -> hPutStrLn stderr err >> exitFailure
 
-    putStrLn "Presubmit checks passed." >>
+    onFailure :: CommandResult -> IO ()
+    onFailure (exit_code, out, err) =
+        stashApply >>
+        hPutStrLn stderr (unlines $ out : err : hookFailedBanner) >>
+        exitWith exit_code
 
-    stashApply
+    onSuccess :: () -> IO ()
+    onSuccess () = stashApply >> hPutStrLn stderr "Presubmit checks passed."

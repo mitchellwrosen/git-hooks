@@ -1,0 +1,32 @@
+[
+   {
+      "command" : ".git-hooks/check_on_master.sh",
+      "args"    : [],
+      "output"  : "Checking current branch..."
+   },
+   {
+      "command" : ".git-hooks/check_ascii_filenames.sh",
+      "args"    : [],
+      "output"  : "Checking for non-ascii filenames..."
+   },
+   {
+      "command" : "git",
+      "args"    : ["diff-index", "--cached", "--check", "HEAD"],
+      "output"  : "Checking for bad whitespace..."
+   },
+   {
+      "command" : "redo",
+      "args"    : ["pre-commit"],
+      "output"  : "Building pre-commit..."
+   },
+   {
+      "command" : "redo",
+      "args"    : ["run_tests"],
+      "output"  : "Building tests..."
+   },
+   {
+      "command" : "./run_tests",
+      "args"    : [],
+      "output"  : "Running tests..."
+   }
+]
