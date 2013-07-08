@@ -7,12 +7,12 @@ import Debug.Trace
 import System.Extras
 
 import Control.Applicative ((<$>), (<*>))
-import Control.Monad.Error
+import Control.Monad (forM_, mzero, unless)
+import Control.Monad.Trans (liftIO)
+import Control.Monad.Trans.Either (eitherT)
 import Data.Aeson (FromJSON, Value(..), parseJSON, (.:), (.:?), eitherDecode')
-import System.Exit (ExitCode(..), exitFailure, exitSuccess, exitWith)
+import System.Exit (exitFailure, exitSuccess, exitWith)
 import System.IO (hPutStrLn, stderr, stdout)
-import System.Process (system)
-import Text.Printf (printf)
 
 import qualified Data.ByteString.Lazy as B
 import qualified Data.String.Utils    as S
@@ -40,23 +40,27 @@ hookFailedBanner = [ "####################################################"
 --
 checkFirstCommit :: IO ()
 checkFirstCommit =
-    system "git rev-parse --verify HEAD >/dev/null 2>&1" >>=
-        \case
-            ExitSuccess -> return ()
-            ExitFailure exit_code ->
-                (hPutStrLn stderr . unlines)
-                    [ " *"
-                    , " * Many pre-commit checks rely on a valid HEAD,"
-                    , " * so the Easy Way Out is to disable this hook"
-                    , " * for your first commit."
-                    , " *"
-                    , " * Know that this commit will go unchecked, and"
-                    , " * with great power comes great responsibility..."
-                    , " *"
-                    , " *     git commit --no-verify"
-                    , " *"
-                    ] >>
-                exitWith (ExitFailure exit_code)
+    eitherT onFailure onSuccess $
+        systemCall' "git" ["rev-parse", "--verify", "HEAD"]
+  where
+    onFailure :: CommandResult -> IO ()
+    onFailure (exit_code, _, _) =
+        (hPutStrLn stderr . unlines)
+            [ " *"
+            , " * Many pre-commit checks rely on a valid HEAD,"
+            , " * so the Easy Way Out is to disable this hook"
+            , " * for your first commit."
+            , " *"
+            , " * Know that this commit will go unchecked, and"
+            , " * with great power comes great responsibility..."
+            , " *"
+            , " *     git commit --no-verify"
+            , " *"
+            ] >>
+        exitWith exit_code
+
+    onSuccess :: CommandResult -> IO ()
+    onSuccess = const $ return ()
 
 -- checkEmptyCommit
 --
@@ -65,24 +69,15 @@ checkFirstCommit =
 --
 checkEmptyCommit :: IO ()
 checkEmptyCommit =
-    system "git diff --quiet --staged" >>=
-        \case
-            ExitSuccess   -> exitSuccess
-            ExitFailure _ -> return ()
+    eitherT (const $ return ()) (const exitSuccess) $
+        systemCall' "git" ["diff", "--staged", "--quiet"]
 
 stashSave :: IO ()
-stashSave =
-    runErrorT (system' "git stash --keep-index --include-untracked --quiet") >>=
-        \case
-            Right _   -> return ()
-            Left  err -> hPutStrLn stderr err >> exitFailure
+stashSave = fatalCall_ "git" (words "stash --keep-index --include-untracked --quiet") []
 
 stashApply :: IO ()
-stashApply = -- system' "git reset --quiet --hard" >>
-    runErrorT (system' "git stash pop --index --quiet") >>=
-        \case
-            Right _   -> return ()
-            Left  err -> hPutStrLn stderr err >> exitFailure
+stashApply = -- fatalCall "git" (words "reset --hard --quiet") [] >>
+             fatalCall_ "git" (words "stash pop --index --quiet") []
 
 -- A Checker represents a program that runs with either no arguments or one
 -- argument (a filename), returning a non-zero exit code on failure.
@@ -106,6 +101,7 @@ stashApply = -- system' "git reset --quiet --hard" >>
 --
 data Checker = Checker
     { chCommand  :: String
+    , chArgs     :: [String]
     , chOutput   :: String
     , chPatterns :: Maybe [String]
     , chOnFail   :: Maybe String
@@ -114,6 +110,7 @@ data Checker = Checker
 instance FromJSON Checker where
     parseJSON (Object o) = Checker          <$>
                            o .:  "command"  <*>
+                           o .:  "args"     <*>
                            o .:  "output"   <*>
                            o .:? "patterns" <*>
                            o .:? "on_fail"
@@ -124,18 +121,28 @@ instance FromJSON Checker where
 -- Runs checker, inspecting |patterns| to determine if it's a repo-scope or
 -- file-scope checker.
 --
-check :: Checker -> ErrorT String IO ()
-check (Checker command output maybe_patterns _) =
-    liftIO (putStrLn output) >>
-    case maybe_patterns of
-        -- File-scope sanity checks.
-        Just patterns ->
-            readProcess' "git diff --staged --name-only --diff-filter=ACM" [] >>=
-            readProcess' ("grep" ++ S.join "\\|" patterns) >>=
-            mapM_ (system' . printf "%s %s" command) . lines
+check :: Checker -> System ()
+-- File-scope sanity checks.
+check (Checker command args output (Just patterns) _) =
+    liftIO (fatalCall "git" ["diff", "--staged", "--name-only", "--diff-filter=ACM"] []) >>= \out ->
+    lines <$> liftIO (fatalCall "grep" [S.join "\\|" patterns] out) >>= \filenames ->
 
-        -- Repository-scope sanity checks.
-        Nothing -> system' command
+    -- Don't print a checker's output unless at least one file matches
+    unless (null filenames) (liftIO $ hPutStrLn stdout output) >>
+
+    forM_ filenames (\filename ->
+        let
+            args' = args ++ [filename]
+        in
+            liftIO (hPutStrLn stdout ("   " ++ filename)) >>
+            systemCall' command args'
+    )
+
+-- Repository-scope sanity checks.
+check (Checker command args output Nothing _) =
+    liftIO (hPutStrLn stdout output) >>
+    systemCall' command args >>
+    return ()
 
 main :: IO ()
 main =
@@ -145,11 +152,8 @@ main =
     checkEmptyCommit >>
 
     stashSave >>
-    runErrorT (mapM_ check checkers) >>= \result ->
-        stashApply >>
-        case result of
-            Right () -> hPutStrLn stdout "Presubmit checks passed."           >> exitSuccess
-            Left err -> hPutStrLn stderr ("Presubmit checks failed: " ++ err) >> exitFailure
+
+    eitherT onFailure onSuccess (mapM_ check checkers)
 
   where
     readCheckers :: IO [Checker]
@@ -158,3 +162,12 @@ main =
         case eitherDecode' contents of
             Right checkers -> return checkers
             Left  err      -> hPutStrLn stderr err >> exitFailure
+
+    onFailure :: CommandResult -> IO ()
+    onFailure (exit_code, out, err) =
+        stashApply >>
+        hPutStrLn stderr (unlines $ out : err : hookFailedBanner) >>
+        exitWith exit_code
+
+    onSuccess :: () -> IO ()
+    onSuccess () = stashApply >> hPutStrLn stderr "Presubmit checks passed."
