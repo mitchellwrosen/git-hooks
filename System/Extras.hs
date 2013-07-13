@@ -2,6 +2,7 @@
 
 module System.Extras where
 
+import Control.Applicative (pure)
 import Control.Monad.Trans (liftIO)
 import Control.Monad.Trans.Either (EitherT, eitherT, left, right)
 import System.Exit (ExitCode(..), exitWith)
@@ -37,6 +38,21 @@ systemCall command args input =
 systemCall' :: String -> [String] -> System CommandResult
 systemCall' command args = systemCall command args []
 
+-- systemCallWithDefault def command args input
+--
+-- Like systemCall, but if the command returns ExitFailure, return |def| in IO.
+-- Otherwise, return the output in IO.
+--
+systemCallWithDefault :: String -> String -> [String] -> String -> IO String
+systemCallWithDefault def command args input =
+    eitherT onFailure onSuccess $ systemCall command args input
+  where
+    onFailure :: CommandResult -> IO String
+    onFailure _ = pure def
+
+    onSuccess :: CommandResult -> IO String
+    onSuccess (_, out, _) = pure out
+
 -- fatalCall command args input
 --
 -- Like systemCall, but if the command returns ExitFailure, print stderr and
@@ -46,15 +62,16 @@ fatalCall command args input =
     eitherT onFailure onSuccess $ systemCall command args input
   where
     onFailure :: CommandResult -> IO String
-    onFailure (exit_code, _, err) = hPutStrLn stderr err >>
-                                    exitWith exit_code
+    onFailure (exit_code, _, err) =
+        hPutStrLn stderr (unwords (command:args) ++ " failed: " ++ err) >>
+        exitWith exit_code
 
     onSuccess :: CommandResult -> IO String
-    onSuccess (_, out, _) = return out
+    onSuccess (_, out, _) = pure out
 
--- fatalCall_ command args input
+-- fatalCall' command args
 --
--- Like fatalCall, but discard the output.
+-- Like fatalCall, but with no input.
 --
-fatalCall_ :: String -> [String] -> String -> IO ()
-fatalCall_ command args input = fatalCall command args input >> return ()
+fatalCall' :: String -> [String] -> IO String
+fatalCall' command args = fatalCall command args []
