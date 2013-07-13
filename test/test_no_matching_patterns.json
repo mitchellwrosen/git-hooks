@@ -1,0 +1,8 @@
+[
+   {
+      "command": "!",
+      "args": ["echo"],
+      "output": "",
+      "patterns": ["\\.txt$"]
+   }
+]

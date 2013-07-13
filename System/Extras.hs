@@ -9,6 +9,9 @@ import System.Exit (ExitCode(..), exitWith)
 import System.IO (hPutStrLn, stderr)
 import System.Process (readProcessWithExitCode)
 
+touchFile :: FilePath -> IO ()
+touchFile file_path = writeFile file_path ""
+--
 -- A monad appropriate for system calls. Runs in IO, and in the case of error,
 -- returns a CommandResult in Left.
 --
@@ -52,6 +55,24 @@ systemCallWithDefault def command args input =
 
     onSuccess :: CommandResult -> IO String
     onSuccess (_, out, _) = pure out
+
+-- systemCallReverse command args input
+--
+-- Like systemCall, but a success is a failure and vice versa.
+--
+systemCallReverse :: String -> [String] -> String -> System CommandResult
+systemCallReverse command args input =
+    liftIO (readProcessWithExitCode command args input) >>=
+        \case
+            result@(ExitSuccess,   _, _) -> left result
+            result@(ExitFailure _, _, _) -> right result
+
+-- systemCallReverse' command args
+--
+-- Like systemCallReverse, but with no input.
+--
+systemCallReverse' :: String -> [String] -> System CommandResult
+systemCallReverse' command args = systemCallReverse command args []
 
 -- fatalCall command args input
 --

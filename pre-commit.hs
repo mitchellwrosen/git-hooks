@@ -32,7 +32,6 @@ hookFailedBanner = [ "####################################################"
                    , "####################################################"
                    ]
 
-
 -- checkFirstCommit
 --
 -- Checks to see if this is the first commit to the repository, and fail with a
@@ -100,19 +99,21 @@ stashApply = -- fatalCall "git" (words "reset --hard --quiet") [] >>
 --      - Logging, debugging, printfs, console.log(), etc.
 --
 data Checker = Checker
-    { chCommand  :: String
-    , chArgs     :: [String]
-    , chOutput   :: String
-    , chPatterns :: Maybe [String]
-    , chOnFail   :: Maybe String
+    { chCommand         :: String
+    , chArgs            :: [String]
+    , chOutput          :: String
+    , chPatterns        :: Maybe [String]
+    , chReverseExitCode :: Maybe Bool
+    , chOnFail          :: Maybe String
     }
 
 instance FromJSON Checker where
-    parseJSON (Object o) = Checker          <$>
-                           o .:  "command"  <*>
-                           o .:  "args"     <*>
-                           o .:  "output"   <*>
-                           o .:? "patterns" <*>
+    parseJSON (Object o) = Checker                   <$>
+                           o .:  "command"           <*>
+                           o .:  "args"              <*>
+                           o .:  "output"            <*>
+                           o .:? "patterns"          <*>
+                           o .:? "reverse_exit_code" <*>
                            o .:? "on_fail"
     parseJSON _ = mzero
 
@@ -123,27 +124,43 @@ instance FromJSON Checker where
 --
 check :: Checker -> System ()
 -- File-scope sanity checks.
-check (Checker command args output (Just patterns) _) =
-    liftIO (fatalCall' "git" ["diff", "--staged", "--name-only", "--diff-filter=ACM"]) >>= \out ->
-    lines <$>
-        lift (systemCallWithDefault
-                "" -- Replace failed greps with "no matches".
-                "grep"
-                [S.join "\\|" patterns]
-                out
-             ) >>= \filenames ->
+check (Checker command args output (Just patterns) maybe_reverse_exit_code _) =
+    case maybe_reverse_exit_code of
+        Just True -> check' systemCallReverse'
+        _         -> check' systemCall'
+  where
+    check' :: (String -> [String] -> System CommandResult) -> System ()
+    check' sysCall =
+        liftIO (fatalCall' "git"
+                           [ "diff"
+                           , "--staged"
+                           , "--name-only"
+                           , "--diff-filter=ACM"
+                           ]) >>= \out ->
+        lines <$>
+            lift (systemCallWithDefault
+                    "" -- Replace failed greps with "no matches".
+                    "grep"
+                    [S.join "\\|" patterns]
+                    out
+                 ) >>= \filenames ->
 
-    -- Don't print a checker's output unless at least one file matches.
-    unless (null filenames) (liftIO $ hPutStrLn stdout output) >>
+        -- Don't print a checker's output unless at least one file matches.
+        unless (null filenames) (liftIO $ hPutStrLn stdout output) >>
 
-    forM_ filenames (\filename ->
-        liftIO (hPutStrLn stdout ("   " ++ filename)) >>
-        systemCall' command (args ++ [filename])
-    )
+        forM_ filenames (\filename ->
+            liftIO (hPutStrLn stdout ("   " ++ filename)) >>
+            sysCall command (args ++ [filename])
+        )
 -- Repository-scope sanity checks.
-check (Checker command args output Nothing _) =
-    liftIO (hPutStrLn stdout output) >>
-    void (systemCall' command args)
+check (Checker command args output Nothing maybe_reverse_exit_code _) =
+    case maybe_reverse_exit_code of
+        Just True -> check' systemCallReverse'
+        _         -> check' systemCall'
+  where
+    check' :: (String -> [String] -> System CommandResult) -> System ()
+    check' sysCall = liftIO (hPutStrLn stdout output) >>
+                     void (sysCall command args)
 
 main :: IO ()
 main =
@@ -161,10 +178,10 @@ main =
             Left  err      -> hPutStrLn stderr err >> exitFailure
 
     onFailure :: CommandResult -> IO ()
-    onFailure (exit_code, out, err) =
+    onFailure (_, out, err) =
         stashApply >>
         hPutStrLn stderr (unlines $ out : err : hookFailedBanner) >>
-        exitWith exit_code
+        exitFailure
 
     onSuccess :: () -> IO ()
     onSuccess () = stashApply >> hPutStrLn stderr "Presubmit checks passed."

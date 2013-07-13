@@ -2,7 +2,7 @@
 
 module Main where
 
-import System.Extras (CommandResult, fatalCall', systemCall')
+import System.Extras (CommandResult, fatalCall', systemCall', touchFile)
 
 import Control.Applicative (pure)
 import Control.Monad (void)
@@ -13,36 +13,39 @@ import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr, stdout)
 import Test.HUnit
 
+tempDir :: String
+tempDir = ".test-environment"
+
 testDir :: String
-testDir = ".test-environment"
+testDir = ".." </> "test"
 
 gitHooksDir :: String
 gitHooksDir = ".git-hooks"
 
--- setupTestEnvironment checkers_str
+-- setupTestEnvironment checkers_file
 --
--- Enters an empty directory, creates a git repo, and commits |checkers_str| to
+-- Enters an empty directory, creates a git repo, and commits |checkers_file| to
 -- .git-hooks/checkers.json.
 --
 setupTestEnvironment :: String -> IO ()
-setupTestEnvironment checkers_str =
-    setupTestEnvironment' checkers_str >>
+setupTestEnvironment checkers_file =
+    setupTestEnvironment' checkers_file >>
     void (fatalCall' "git" ["commit", "--no-verify", "-m", "1"])
 
--- setupTestEnvironment' checkers_str
+-- setupTestEnvironment' checkers_file
 --
--- Enters an empty directory, creates a git repo, git adds |checkers_str| after
--- writing it to .git-hooks/checkers.json, but doesn't commit it (so that the
+-- Enters an empty directory, creates a git repo, git adds |checkers_file| after
+-- copying it to .git-hooks/checkers.json, but doesn't commit it (so that the
 -- first commit can be tested)
 --
 setupTestEnvironment' :: String -> IO ()
-setupTestEnvironment' checkers_str =
-    void (fatalCall' "rm" ["-rf", testDir])                 >>
-    createDirectoryIfMissing True (testDir </> gitHooksDir) >>
-    setCurrentDirectory testDir                             >>
+setupTestEnvironment' checkers_file =
+    void (fatalCall' "rm" ["-rf", tempDir])                 >>
+    createDirectoryIfMissing True (tempDir </> gitHooksDir) >>
+    setCurrentDirectory tempDir                             >>
     void (fatalCall' "git" ["init"])                        >>
     copyFile "../pre-commit" ".git/hooks/pre-commit"        >>
-    writeFile checkersDest checkers_str                     >>
+    copyFile (testDir </> checkers_file) checkersDest       >>
     void (fatalCall' "git" ["add", checkersDest])
   where
     checkersDest :: String
@@ -55,7 +58,7 @@ setupTestEnvironment' checkers_str =
 teardownTestEnvironment :: IO ()
 teardownTestEnvironment =
    setCurrentDirectory ".." >>
-   void (fatalCall' "rm" ["-rf", testDir])
+   void (fatalCall' "rm" ["-rf", tempDir])
 
 --------------------------------------------------------------------------------
 
@@ -67,7 +70,7 @@ isFirstCommit =
 -- The first commit to a repo should fail.
 testFirstCommit :: Test
 testFirstCommit = TestCase $
-    setupTestEnvironment' "[]" >>
+    setupTestEnvironment' "test_first_commit.json" >>
     isFirstCommit >>=
         \case
             True ->
@@ -91,23 +94,11 @@ testFirstCommit = TestCase $
 -- A checker that doesn't match any patterns should not run.
 testNoMatchingPatterns :: Test
 testNoMatchingPatterns = TestCase $
-    setupTestEnvironment checkers_str >>
-    writeFile "not-a-txt-file" "" >>
+    setupTestEnvironment "test_no_matching_patterns.json" >>
+    touchFile "not-a-txt-file" >>
     void (fatalCall' "git" ["add", "not-a-txt-file"]) >>
     eitherT onFailure onSuccess (systemCall' "git" ["commit", "-m", "foo"])
   where
-    checkers_str :: String
-    checkers_str =
-        unlines [ "["
-                , "   {"
-                , "      \"command\"  : \"!\","
-                , "      \"args\"     : [\"echo\"],"
-                , "      \"output\"   : \"\","
-                , "      \"patterns\" : [\"\\\\.txt$\"]"
-                , "   }"
-                , "]"
-                ]
-
     onFailure :: CommandResult -> IO ()
     onFailure (_, out, err) =
         teardownTestEnvironment >>
@@ -118,11 +109,29 @@ testNoMatchingPatterns = TestCase $
     onSuccess :: CommandResult -> IO ()
     onSuccess _ = teardownTestEnvironment
 
+--------------------------------------------------------------------------------
+
+-- A checker with "reverse_exit_code: true" should run correctly.
+testReverseExitCode :: Test
+testReverseExitCode = TestCase $
+    setupTestEnvironment "test_reverse_exit_code.json" >>
+    writeFile "has-a-todo" "TODO" >>
+    void (fatalCall' "git" ["add", "has-a-todo"]) >>
+    eitherT onFailure onSuccess (systemCall' "git" ["commit", "-m", "foo"])
+  where
+    onFailure :: CommandResult -> IO ()
+    onFailure _ = teardownTestEnvironment
+
+    onSuccess :: CommandResult -> IO ()
+    onSuccess _ = teardownTestEnvironment >>
+                  assertFailure "Commit succeeded."
+
 -- test no checkers.json
 
 tests :: Test
 tests = TestList [ TestLabel "testFirstCommit"        testFirstCommit
                  , TestLabel "testNoMatchingPatterns" testNoMatchingPatterns
+                 , TestLabel "testReverseExitCode"    testReverseExitCode
                  ]
 
 main :: IO ()
