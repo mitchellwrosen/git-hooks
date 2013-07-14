@@ -4,14 +4,16 @@ module Main where
 
 import Debug.Trace
 
-import System.Extras
-
 import Control.Applicative ((<$>), (<*>), pure)
 import Control.Monad (forM_, mzero, unless, void)
 import Control.Monad.Trans (lift, liftIO)
 import Control.Monad.Trans.Either (eitherT)
 import Data.Aeson (FromJSON, Value(..), parseJSON, (.:), (.:?), eitherDecode')
 import System.Exit (exitFailure, exitSuccess, exitWith)
+import System.Extras
+    ( CommandResult, System, fatalCall', systemCall', systemCallReverse'
+    , systemCallWithDefault
+    )
 import System.IO (hPutStrLn, stderr, stdout)
 
 import qualified Data.ByteString.Lazy as B

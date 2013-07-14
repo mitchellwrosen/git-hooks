@@ -15,17 +15,24 @@
       "output"  : "Checking for bad whitespace..."
    },
    {
+      "command"           : "grep",
+      "args"              : ["TODO\\|FIXME"],
+      "output"            : "Looking for TODO/FIXME...",
+      "patterns"          : ["^src/", "^test/"],
+      "reverse_exit_code" : true
+   },
+   {
       "command" : "redo",
-      "args"    : ["pre-commit"],
+      "args"    : ["src/pre-commit"],
       "output"  : "Building pre-commit..."
    },
    {
       "command" : "redo",
-      "args"    : ["run_tests"],
+      "args"    : ["test/run_tests"],
       "output"  : "Building tests..."
    },
    {
-      "command" : "./run_tests",
+      "command" : "test/run_tests",
       "args"    : [],
       "output"  : "Running tests..."
    }

@@ -2,13 +2,12 @@
 
 module Main where
 
-import System.Extras (CommandResult, fatalCall', systemCall', touchFile)
-
 import Control.Applicative (pure)
 import Control.Monad (void)
 import Control.Monad.Trans.Either (eitherT)
 import System.Directory (createDirectoryIfMissing, copyFile, setCurrentDirectory)
 import System.Exit (exitFailure, exitSuccess)
+import System.Extras (CommandResult, fatalCall', systemCall', touchFile)
 import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr, stdout)
 import Test.HUnit
@@ -126,6 +125,8 @@ testReverseExitCode = TestCase $
     onSuccess _ = teardownTestEnvironment >>
                   assertFailure "Commit succeeded."
 
+--------------------------------------------------------------------------------
+
 -- test no checkers.json
 
 tests :: Test
@@ -133,6 +134,8 @@ tests = TestList [ TestLabel "testFirstCommit"        testFirstCommit
                  , TestLabel "testNoMatchingPatterns" testNoMatchingPatterns
                  , TestLabel "testReverseExitCode"    testReverseExitCode
                  ]
+
+--------------------------------------------------------------------------------
 
 main :: IO ()
 main = runTestTT tests >>= \test_counts ->
