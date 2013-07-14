@@ -6,9 +6,9 @@ import Debug.Trace
 
 import System.Extras
 
-import Control.Applicative ((<$>), (<*>))
-import Control.Monad (forM_, mzero, unless)
-import Control.Monad.Trans (liftIO)
+import Control.Applicative ((<$>), (<*>), pure)
+import Control.Monad (forM_, mzero, unless, void)
+import Control.Monad.Trans (lift, liftIO)
 import Control.Monad.Trans.Either (eitherT)
 import Data.Aeson (FromJSON, Value(..), parseJSON, (.:), (.:?), eitherDecode')
 import System.Exit (exitFailure, exitSuccess, exitWith)
@@ -31,7 +31,6 @@ hookFailedBanner = [ "####################################################"
                    , "#                                                  #"
                    , "####################################################"
                    ]
-
 
 -- checkFirstCommit
 --
@@ -60,7 +59,7 @@ checkFirstCommit =
         exitWith exit_code
 
     onSuccess :: CommandResult -> IO ()
-    onSuccess = const $ return ()
+    onSuccess = const $ pure ()
 
 -- checkEmptyCommit
 --
@@ -69,15 +68,15 @@ checkFirstCommit =
 --
 checkEmptyCommit :: IO ()
 checkEmptyCommit =
-    eitherT (const $ return ()) (const exitSuccess) $
+    eitherT (const $ pure ()) (const exitSuccess) $
         systemCall' "git" ["diff", "--staged", "--quiet"]
 
 stashSave :: IO ()
-stashSave = fatalCall_ "git" (words "stash --keep-index --include-untracked --quiet") []
+stashSave = void $ fatalCall' "git" (words "stash --keep-index --include-untracked --quiet")
 
 stashApply :: IO ()
 stashApply = -- fatalCall "git" (words "reset --hard --quiet") [] >>
-             fatalCall_ "git" (words "stash pop --index --quiet") []
+             void $ fatalCall' "git" (words "stash pop --index --quiet")
 
 -- A Checker represents a program that runs with either no arguments or one
 -- argument (a filename), returning a non-zero exit code on failure.
@@ -100,19 +99,21 @@ stashApply = -- fatalCall "git" (words "reset --hard --quiet") [] >>
 --      - Logging, debugging, printfs, console.log(), etc.
 --
 data Checker = Checker
-    { chCommand  :: String
-    , chArgs     :: [String]
-    , chOutput   :: String
-    , chPatterns :: Maybe [String]
-    , chOnFail   :: Maybe String
+    { chCommand         :: String
+    , chArgs            :: [String]
+    , chOutput          :: String
+    , chPatterns        :: Maybe [String]
+    , chReverseExitCode :: Maybe Bool
+    , chOnFail          :: Maybe String
     }
 
 instance FromJSON Checker where
-    parseJSON (Object o) = Checker          <$>
-                           o .:  "command"  <*>
-                           o .:  "args"     <*>
-                           o .:  "output"   <*>
-                           o .:? "patterns" <*>
+    parseJSON (Object o) = Checker                   <$>
+                           o .:  "command"           <*>
+                           o .:  "args"              <*>
+                           o .:  "output"            <*>
+                           o .:? "patterns"          <*>
+                           o .:? "reverse_exit_code" <*>
                            o .:? "on_fail"
     parseJSON _ = mzero
 
@@ -123,51 +124,64 @@ instance FromJSON Checker where
 --
 check :: Checker -> System ()
 -- File-scope sanity checks.
-check (Checker command args output (Just patterns) _) =
-    liftIO (fatalCall "git" ["diff", "--staged", "--name-only", "--diff-filter=ACM"] []) >>= \out ->
-    lines <$> liftIO (fatalCall "grep" [S.join "\\|" patterns] out) >>= \filenames ->
+check (Checker command args output (Just patterns) maybe_reverse_exit_code _) =
+    case maybe_reverse_exit_code of
+        Just True -> check' systemCallReverse'
+        _         -> check' systemCall'
+  where
+    check' :: (String -> [String] -> System CommandResult) -> System ()
+    check' sysCall =
+        liftIO (fatalCall' "git"
+                           [ "diff"
+                           , "--staged"
+                           , "--name-only"
+                           , "--diff-filter=ACM"
+                           ]) >>= \out ->
+        lines <$>
+            lift (systemCallWithDefault
+                    "" -- Replace failed greps with "no matches".
+                    "grep"
+                    [S.join "\\|" patterns]
+                    out
+                 ) >>= \filenames ->
 
-    -- Don't print a checker's output unless at least one file matches
-    unless (null filenames) (liftIO $ hPutStrLn stdout output) >>
+        -- Don't print a checker's output unless at least one file matches.
+        unless (null filenames) (liftIO $ hPutStrLn stdout output) >>
 
-    forM_ filenames (\filename ->
-        let
-            args' = args ++ [filename]
-        in
+        forM_ filenames (\filename ->
             liftIO (hPutStrLn stdout ("   " ++ filename)) >>
-            systemCall' command args'
-    )
-
+            sysCall command (args ++ [filename])
+        )
 -- Repository-scope sanity checks.
-check (Checker command args output Nothing _) =
-    liftIO (hPutStrLn stdout output) >>
-    systemCall' command args >>
-    return ()
+check (Checker command args output Nothing maybe_reverse_exit_code _) =
+    case maybe_reverse_exit_code of
+        Just True -> check' systemCallReverse'
+        _         -> check' systemCall'
+  where
+    check' :: (String -> [String] -> System CommandResult) -> System ()
+    check' sysCall = liftIO (hPutStrLn stdout output) >>
+                     void (sysCall command args)
 
 main :: IO ()
 main =
-    readCheckers >>= \checkers ->
-
+    readCheckers     >>= \checkers ->
     checkFirstCommit >>
     checkEmptyCommit >>
-
-    stashSave >>
-
+    stashSave        >>
     eitherT onFailure onSuccess (mapM_ check checkers)
-
   where
     readCheckers :: IO [Checker]
     readCheckers =
         B.readFile ".git-hooks/checkers.json" >>= \contents ->
         case eitherDecode' contents of
-            Right checkers -> return checkers
+            Right checkers -> pure checkers
             Left  err      -> hPutStrLn stderr err >> exitFailure
 
     onFailure :: CommandResult -> IO ()
-    onFailure (exit_code, out, err) =
+    onFailure (_, out, err) =
         stashApply >>
         hPutStrLn stderr (unlines $ out : err : hookFailedBanner) >>
-        exitWith exit_code
+        exitFailure
 
     onSuccess :: () -> IO ()
     onSuccess () = stashApply >> hPutStrLn stderr "Presubmit checks passed."

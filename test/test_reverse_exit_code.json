@@ -1,0 +1,9 @@
+[
+   {
+      "command": "grep",
+      "args": ["TODO"],
+      "output": "",
+      "patterns": ["."],
+      "reverse_exit_code": true
+   }
+]
