@@ -21,6 +21,18 @@ testDir = ".." </> "test"
 gitHooksDir :: String
 gitHooksDir = ".git-hooks"
 
+main :: IO ()
+main = runTestTT tests >>= \test_counts ->
+    case (errors test_counts, failures test_counts) of
+        (0, 0) -> exitSuccess
+        _      -> exitFailure
+
+tests :: Test
+tests = TestList [ TestLabel "testFirstCommit"        testFirstCommit
+                 , TestLabel "testNoMatchingPatterns" testNoMatchingPatterns
+                 , TestLabel "testReverseExitCode"    testReverseExitCode
+                 ]
+
 -- setupTestEnvironment checkers_file
 --
 -- Enters an empty directory, creates a git repo, and commits |checkers_file| to
@@ -59,8 +71,6 @@ teardownTestEnvironment =
    setCurrentDirectory ".." >>
    void (fatalCall' "rm" ["-rf", tempDir])
 
---------------------------------------------------------------------------------
-
 isFirstCommit :: IO Bool
 isFirstCommit =
     eitherT (const $ pure True) (const $ pure False) $
@@ -88,8 +98,6 @@ testFirstCommit = TestCase $
     onSuccess _ = teardownTestEnvironment >>
                   assertFailure "First commit succeeded."
 
---------------------------------------------------------------------------------
-
 -- A checker that doesn't match any patterns should not run.
 testNoMatchingPatterns :: Test
 testNoMatchingPatterns = TestCase $
@@ -108,8 +116,6 @@ testNoMatchingPatterns = TestCase $
     onSuccess :: CommandResult -> IO ()
     onSuccess _ = teardownTestEnvironment
 
---------------------------------------------------------------------------------
-
 -- A checker with "reverse_exit_code: true" should run correctly.
 testReverseExitCode :: Test
 testReverseExitCode = TestCase $
@@ -125,20 +131,4 @@ testReverseExitCode = TestCase $
     onSuccess _ = teardownTestEnvironment >>
                   assertFailure "Commit succeeded."
 
---------------------------------------------------------------------------------
-
 -- test no checkers.json
-
-tests :: Test
-tests = TestList [ TestLabel "testFirstCommit"        testFirstCommit
-                 , TestLabel "testNoMatchingPatterns" testNoMatchingPatterns
-                 , TestLabel "testReverseExitCode"    testReverseExitCode
-                 ]
-
---------------------------------------------------------------------------------
-
-main :: IO ()
-main = runTestTT tests >>= \test_counts ->
-    case (errors test_counts, failures test_counts) of
-        (0, 0) -> exitSuccess
-        _      -> exitFailure

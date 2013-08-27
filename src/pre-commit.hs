@@ -34,13 +34,36 @@ hookFailedBanner = [ "####################################################"
                    , "####################################################"
                    ]
 
--- checkFirstCommit
---
--- Checks to see if this is the first commit to the repository, and fail with a
--- helpful error message if so.
---
-checkFirstCommit :: IO ()
-checkFirstCommit =
+main :: IO ()
+main =
+    readCheckers         >>= \checkers ->
+    doPreStashSaveChecks >>
+    stashSave            >>
+    eitherT onFailure onSuccess (mapM_ check checkers)
+  where
+    readCheckers :: IO [Checker]
+    readCheckers =
+        B.readFile ".git-hooks/checkers.json" >>= \contents ->
+        case eitherDecode' contents of
+            Right checkers -> pure checkers
+            Left  err      -> hPutStrLn stderr err >> exitFailure
+
+    onFailure :: CommandResult -> IO ()
+    onFailure (_, out, err) =
+        stashApply >>
+        hPutStrLn stderr (unlines $ out : err : hookFailedBanner) >>
+        exitFailure
+
+    onSuccess :: () -> IO ()
+    onSuccess () = stashApply >> hPutStrLn stderr "Presubmit checks passed."
+
+doPreStashSaveChecks :: IO ()
+doPreStashSaveChecks =
+    checkIsFirstCommit >>
+    checkIsEmptyCommit
+
+checkIsFirstCommit :: IO ()
+checkIsFirstCommit =
     eitherT onFailure onSuccess $
         systemCall' "git" ["rev-parse", "--verify", "HEAD"]
   where
@@ -61,15 +84,10 @@ checkFirstCommit =
         exitWith exit_code
 
     onSuccess :: CommandResult -> IO ()
-    onSuccess = const $ pure ()
+    onSuccess _ = pure ()
 
--- checkEmptyCommit
---
--- Checks whether or not this is an empty commit. If it is, there is no need
--- to do any pre-commit check, so exit with success.
---
-checkEmptyCommit :: IO ()
-checkEmptyCommit =
+checkIsEmptyCommit :: IO ()
+checkIsEmptyCommit =
     eitherT (const $ pure ()) (const exitSuccess) $
         systemCall' "git" ["diff", "--staged", "--quiet"]
 
@@ -164,26 +182,3 @@ check (Checker command args output Nothing maybe_reverse_exit_code _) =
     check' sysCall = liftIO (hPutStrLn stdout output) >>
                      void (sysCall command args)
 
-main :: IO ()
-main =
-    readCheckers     >>= \checkers ->
-    checkFirstCommit >>
-    checkEmptyCommit >>
-    stashSave        >>
-    eitherT onFailure onSuccess (mapM_ check checkers)
-  where
-    readCheckers :: IO [Checker]
-    readCheckers =
-        B.readFile ".git-hooks/checkers.json" >>= \contents ->
-        case eitherDecode' contents of
-            Right checkers -> pure checkers
-            Left  err      -> hPutStrLn stderr err >> exitFailure
-
-    onFailure :: CommandResult -> IO ()
-    onFailure (_, out, err) =
-        stashApply >>
-        hPutStrLn stderr (unlines $ out : err : hookFailedBanner) >>
-        exitFailure
-
-    onSuccess :: () -> IO ()
-    onSuccess () = stashApply >> hPutStrLn stderr "Presubmit checks passed."
